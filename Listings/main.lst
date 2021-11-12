@@ -1,0 +1,349 @@
+C51 COMPILER V9.54   MAIN                                                                  12/14/2019 13:08:29 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN .\Objects\main.obj
+COMPILER INVOKED BY: G:\keil\C51\BIN\C51.EXE main.c LARGE OPTIMIZE(8,SPEED) BROWSE DEBUG OBJECTEXTEND PRINT(.\Listings\m
+                    -ain.lst) TABS(2) OBJECT(.\Objects\main.obj)
+
+line level    source
+
+   1          #include "STC15F2K60S2.H"
+   2          #include "ADC.h"
+   3          
+   4          //左右PWM控制
+   5          float RPWM;
+   6          float LPWM;
+   7          sbit L_I1 = P2^1;
+   8          sbit L_O1 = P2^0;
+   9          sbit L_I2 = P2^3;
+  10          sbit L_O2 = P2^2;
+  11          
+  12          sbit R_I1 = P2^4;
+  13          sbit R_O1 = P2^5;
+  14          sbit R_I2 = P2^6;
+  15          sbit R_O2 = P2^7;
+  16          /********************/
+  17          sbit STOP = P3^2;
+  18          sbit Bee  =  P5^5;
+  19          /**********************/
+  20          
+  21          #define L_Front_RUN L_I1=L_I2=1,L_O1=L_O2=0
+  22          #define R_Front_RUN R_I1=R_I2=1,R_O1=R_O2=0
+  23          #define L_Back_RUN  L_I1=L_I2=0,L_O1=L_O2=1
+  24          #define R_Back_RUN  R_I1=R_I2=0,R_O1=R_O2=1
+  25          #define L_STOP      L_I1=L_O1=L_I2=L_O2=0
+  26          #define R_STOP      R_I1=R_O1=R_I2=R_O2=0
+  27          
+  28          
+  29          
+  30          /*这里是PWM的结构体*/
+  31          struct{
+  32              float err0;     //当前误差
+  33              float err1;     //前1次误差
+  34              float P;    //系数
+  35              float dert;     //增量
+  36          }PID;
+  37          
+  38          struct{
+  39              float left;
+  40              float right;
+  41          }PWM;
+  42          
+  43          struct{
+  44              float left;
+  45              float right;
+  46              float mid;
+  47          }ADC;
+  48          
+  49          //定义一些无符号整型数据
+  50          typedef  unsigned char   u8;
+  51          typedef  unsigned int    u16;
+  52          typedef  unsigned long   u32;
+  53          /*******************/
+  54          //用于停车
+C51 COMPILER V9.54   MAIN                                                                  12/14/2019 13:08:29 PAGE 2   
+
+  55          u8 car_state = 0;
+  56          u8 temp = 0;
+  57          /******************/
+  58          
+  59          
+  60          //变量用于PWM输出
+  61          int T=0;
+  62          int Times = 0;
+  63          int MID=0;
+  64          int SPEED=0;
+  65          sbit K1=P0^0;
+  66          sbit K2=P0^1;
+  67          sbit K3=P0^4;
+  68          
+  69          
+  70          bit busy;
+  71          
+  72          void PID_RUN(float V_left,float V_right);
+  73          void INT_Init();    /***********/
+  74          void Timer0Init(void);
+  75          void PID_INIT(float,float,float);
+  76          void motoProcess(void);
+  77          void Send_PWM_Data(BYTE,float);
+  78          void Button_Init(void);
+  79          void UART_Init(void);
+  80          void Send_Der_Data(float,float);
+  81          void Delay1ms();    /**********/
+  82          /******************** 主函数**************************/
+  83          void main(void)
+  84          {
+  85   1        //定时器和PID的初始化
+  86   1        PID_INIT(0,0,0);//L,R,P,I,D
+  87   1        INT_Init();     /**************************/
+  88   1        Timer0Init(); 
+  89   1        InitADC();
+  90   1        Button_Init();
+  91   1        UART_Init();
+  92   1        while(1){
+  93   2        if(!K1) {PID_INIT(40.0, 40.0, 0.23);SPEED=80;break;}//40.0, 40.0, 0.23
+  94   2        if(!K2) {PID_INIT(45.0, 45.0, 0.20);SPEED=70;break;}//45.0, 45.0, 0.20
+  95   2        if(!K3) {PID_INIT(45.0, 45.0, 0.20);SPEED=99;break;}
+  96   2        }
+  97   1        while(1)
+  98   1        {   
+  99   2          ADC.left = ADC_MAX(0);
+ 100   2          ADC.right= ADC_MAX(2);
+ 101   2          ADC.mid  = ADC_MAX(1);
+ 102   2          PID_RUN(ADC.left,ADC.right);
+ 103   2          if(ADC.mid>350) MID=1;
+ 104   2          else MID=0;
+ 105   2          
+ 106   2          if(car_state > 1)   //当第二次经过起点线，停车
+ 107   2          {
+ 108   3            break;
+ 109   3          }
+ 110   2        }
+ 111   1      }
+ 112          
+ 113          /*电机处理函数*/
+ 114          void motoProcess()
+ 115          {
+ 116   1        if(PWM.left <10) LPWM = 11.6-0.16*PWM.left;
+C51 COMPILER V9.54   MAIN                                                                  12/14/2019 13:08:29 PAGE 3   
+
+ 117   1        else LPWM=PWM.left;
+ 118   1        if(PWM.right<10) RPWM = 11.6-0.16*PWM.right;
+ 119   1        else RPWM=PWM.right;
+ 120   1      }
+ 121          
+ 122          void Button_Init()
+ 123          {
+ 124   1        /*配置PO_0 P0_1 P0_4为高阻态，作为输入*/
+ 125   1        P0M0 = 0X00;
+ 126   1        P0M1 = 0X13;  //0001 0011
+ 127   1        /********************/
+ 128   1        P5M0 = 0X20;
+ 129   1        P5M1 = 0X00;
+ 130   1        Bee = 0;
+ 131   1        STOP = 0;
+ 132   1        /*********************/
+ 133   1      }
+ 134          
+ 135          /*************************************/
+ 136          void INT_Init()
+ 137          {
+ 138   1        
+ 139   1        IT0 = 0;    //上升沿触发
+ 140   1        EX0 = 1;    //开启外部中断
+ 141   1        EA = 1;     //开启总中断
+ 142   1      }
+ 143          /**************************************/
+ 144          
+ 145          void Timer0Init(void)   //0.1毫秒@24.000MHz
+ 146          {
+ 147   1        AUXR |= 0x80;   //定时器时钟1T模式
+ 148   1        TMOD &= 0xF0;   //设置定时器模式
+ 149   1        TL0 = 0xA0;   //设置定时初值
+ 150   1        TH0 = 0xF6;   //设置定时初值
+ 151   1        TF0 = 0;    //清除TF0标志
+ 152   1        TR0 = 1;    //定时器0开始计时
+ 153   1        EA  = 1;
+ 154   1        ET0 = 1;
+ 155   1        TR0 = 1;
+ 156   1      }
+ 157          
+ 158          void UART_Init()
+ 159          {
+ 160   1      //  ACC = P_SW1;
+ 161   1      //  ACC &= ~(S1_S0 | S1_S1);    //S1_S0=0 S1_S1=0
+ 162   1      //  P_SW1 = ACC;                //(P3.0/RxD, P3.1/TxD)
+ 163   1        SCON = 0x50;    //8位数据,可变波特率
+ 164   1        AUXR |= 0x40;   //定时器1时钟为Fosc,即1T
+ 165   1        AUXR &= 0xFE;   //串口1选择定时器1为波特率发生器
+ 166   1        TMOD &= 0x0F;   //设定定时器1为16位自动重装方式
+ 167   1        TL1 = 0xCC;   //设定定时初值
+ 168   1        TH1 = 0xFF;   //设定定时初值
+ 169   1        ET1 = 0;    //禁止定时器1中断
+ 170   1        TR1 = 1;    //启动定时器1
+ 171   1        ES = 1;     //使能串口中断
+ 172   1        EA = 1;
+ 173   1      
+ 174   1      }
+ 175          
+ 176          /*PID和PWM的初始化*/
+ 177          void PID_INIT(float PWM_LEFT,float PWM_RIGHT,float PID_P)
+ 178          {
+C51 COMPILER V9.54   MAIN                                                                  12/14/2019 13:08:29 PAGE 4   
+
+ 179   1          PID.err0 = 0.0;
+ 180   1          PID.err1 = 0.0;
+ 181   1          PID.dert = 0.0;
+ 182   1          PID.P = PID_P;
+ 183   1          PWM.left = PWM_LEFT;
+ 184   1          PWM.right= PWM_RIGHT;
+ 185   1          LPWM = PWM_LEFT;
+ 186   1          RPWM = PWM_RIGHT;
+ 187   1      }
+ 188          
+ 189          
+ 190          /*PID执行函数*/
+ 191          void PID_RUN(float ADC_left,float ADC_right)
+ 192          {
+ 193   1          PID.err1 = PID.err0;
+ 194   1          PID.err0 = ADC_left - ADC_right;
+ 195   1          PID.dert = PID.P*(PID.err0-PID.err1);
+ 196   1          PWM.left -= PID.dert/2;
+ 197   1          PWM.right+= PID.dert/2;
+ 198   1          motoProcess();
+ 199   1      }
+ 200          
+ 201          /*****************************************/
+ 202          void Int0_run() interrupt 0   //外部中断服务函数
+ 203          {
+ 204   1        if(STOP == 1)
+ 205   1        {
+ 206   2          Delay1ms();
+ 207   2          if(STOP == 1 && temp == 0)
+ 208   2          {
+ 209   3            car_state++;
+ 210   3            if(car_state == 2)
+ 211   3            {
+ 212   4              Bee = 1;
+ 213   4            }
+ 214   3          }
+ 215   2        }
+ 216   1        temp = STOP;
+ 217   1      }
+ 218          /************************************************/
+ 219          
+ 220          /*中断函数*/
+ 221          void timer0_int (void) interrupt 1
+ 222          {
+ 223   1        if(T==100)  T=0;
+ 224   1        //右边的PWM
+ 225   1        if(SPEED&&MID){
+ 226   2          if(T<SPEED) {L_Front_RUN;R_Front_RUN;}
+ 227   2          else     {L_STOP;R_STOP;}
+ 228   2        }
+ 229   1        else{
+ 230   2        if(T<RPWM)
+ 231   2          if(PWM.right<10) R_Back_RUN;
+ 232   2          else R_Front_RUN;
+ 233   2        else
+ 234   2          R_STOP;
+ 235   2        //左边的PWM
+ 236   2        if(T<LPWM)
+ 237   2          if(PWM.left<10) L_Back_RUN;
+ 238   2          else L_Front_RUN;
+ 239   2        else
+ 240   2          L_STOP;}
+C51 COMPILER V9.54   MAIN                                                                  12/14/2019 13:08:29 PAGE 5   
+
+ 241   1        T++;
+ 242   1      //UART传输数据仅在调试参数时使用
+ 243   1      //*********************************
+ 244   1      
+ 245   1      //  if(Times>4000){
+ 246   1      ////    Send_PWM_Data('L',LPWM);
+ 247   1      ////    Send_PWM_Data('R',RPWM);
+ 248   1      //    Send_ADC_Data('L',ADC.left);
+ 249   1      //    Send_ADC_Data('R',ADC.right);
+ 250   1      ////    Send_ADC_Data('M',ADC.mid);
+ 251   1      //    Send_Der_Data(ADC.left,ADC.right);
+ 252   1      //    Times = 0;
+ 253   1      //  }
+ 254   1      //  Times++;
+ 255   1      
+ 256   1      //*********************************
+ 257   1      }
+ 258          
+ 259          void Send_PWM_Data(BYTE ch,float PWM_Data)
+ 260          {
+ 261   1        int INT_DATA = (int)PWM_Data;
+ 262   1        int Data[3];
+ 263   1        SendData(ch);
+ 264   1        SendData('P');
+ 265   1        SendData('W');
+ 266   1        SendData('M');
+ 267   1        SendData(' ');
+ 268   1        if(ch=='L')
+ 269   1          if(PWM.left<10)
+ 270   1            SendData('-');
+ 271   1          else SendData('+');
+ 272   1        else if(PWM.right<10)
+ 273   1               SendData('-');
+ 274   1             else SendData('+');
+ 275   1        Data[0] = INT_DATA/100%10;
+ 276   1        Data[1] = INT_DATA/10%10;
+ 277   1        Data[2] = INT_DATA/1%10;
+ 278   1        SendData(Data[0]+'0');
+ 279   1        SendData(Data[1]+'0');
+ 280   1        SendData(Data[2]+'0');
+ 281   1        SendData('a');
+ 282   1        SendData('\n');
+ 283   1      }
+ 284          void Send_Der_Data(float L,float R)
+ 285          {
+ 286   1        int INT_Dert = (int)(L-R);
+ 287   1        int Data[3];
+ 288   1        SendData('D');
+ 289   1        SendData('e');
+ 290   1        SendData('r');
+ 291   1        SendData('t');
+ 292   1        SendData(' ');
+ 293   1        if(INT_Dert<0)  {INT_Dert =-INT_Dert;SendData('-');}
+ 294   1        else            {INT_Dert = INT_Dert;SendData('+');}
+ 295   1        Data[0] = INT_Dert/100%10;
+ 296   1        Data[1] = INT_Dert/10%10;
+ 297   1        Data[2] = INT_Dert/1%10;
+ 298   1        SendData(Data[0]+'0');
+ 299   1        SendData(Data[1]+'0');
+ 300   1        SendData(Data[2]+'0');
+ 301   1        SendData('a');
+ 302   1        SendData('\n');
+C51 COMPILER V9.54   MAIN                                                                  12/14/2019 13:08:29 PAGE 6   
+
+ 303   1      }
+ 304          
+ 305          void Delay1ms()   //@24.000MHz
+ 306          {
+ 307   1        unsigned char i, j;
+ 308   1      
+ 309   1        i = 24;
+ 310   1        j = 85;
+ 311   1        do
+ 312   1        {
+ 313   2          while (--j);
+ 314   2        } while (--i);
+ 315   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1846    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =     54      49
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      1    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
